@@ -12,11 +12,9 @@ rich = "^13.7.0"
 pydantic = "^2.5.3"
 sseclient-py = "^1.8.0"
 httpx = "^0.26.0"
+textual = {extras = ["dev"], version = "^0.50.1"}
+aiohttp = "^3.9.3"
 
-
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.group.lint.dependencies]
 pysen = "^0.10"
@@ -24,7 +22,6 @@ mypy = "^1.0"
 black = "^23.0"
 isort = "^5.0"
 flake8 = "^6.0"
-# wemake-python-styleguide = "^0.17.0"
 
 [tool.pysen]
 version = "0.10"
@@ -44,3 +41,7 @@ py_version = "py311"
 [tool.pysen.lint.source]
 # includes = ["."]
 excludes = [".venv"]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
