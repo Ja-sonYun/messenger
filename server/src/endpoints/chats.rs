@@ -1,7 +1,7 @@
 use crate::models::chat::ChatChunk;
 use actix_web::dev::HttpServiceFactory;
 use actix_web::rt::time::interval;
-use actix_web::{get, post, web, web::Data, HttpResponse, Responder};
+use actix_web::{get, post, web, HttpResponse, Responder};
 use actix_web_lab::{
     sse::{self, Sse},
     util::InfallibleStream,
@@ -13,10 +13,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 pub fn chat_endpoints() -> impl HttpServiceFactory {
-    let data = Broadcaster::create();
-
     web::scope("/chats")
-        .app_data(Data::from(Arc::clone(&data)))
         .service(event_stream)
         .service(broadcast)
 }
@@ -54,6 +51,7 @@ impl Broadcaster {
 
     async fn remove_stale_clients(&self) {
         let clients = self.inner.lock().clients.clone();
+        println!("Checking {} clients", clients.len());
 
         let mut ok_clients = Vec::new();
 
@@ -66,6 +64,7 @@ impl Broadcaster {
                 ok_clients.push(client.clone());
             }
         }
+        println!("Active {} clients", ok_clients.len());
 
         self.inner.lock().clients = ok_clients;
     }
@@ -80,14 +79,16 @@ impl Broadcaster {
         Sse::from_infallible_receiver(rx)
     }
 
-    pub async fn broadcast(&self, msg: &str) {
+    pub async fn broadcast(&self, chat_chunk: &ChatChunk) {
         let clients = self.inner.lock().clients.clone();
 
-        let send_futures = clients
-            .iter()
-            .map(|client| client.send(sse::Data::new(msg).into()));
+        let send_futures = clients.iter().map(|client| {
+            client.send(sse::Data::new(chat_chunk.to_broadcast_chunk().to_string()).into())
+        });
 
+        println!("Broadcasting to {} clients", clients.len());
         let _ = future::join_all(send_futures).await;
+        println!("Broadcasting done");
     }
 }
 
@@ -102,7 +103,7 @@ async fn broadcast(
     // path: Path<(String,)>,
     chunk: web::Json<ChatChunk>,
 ) -> impl Responder {
-    broadcaster.broadcast(&chunk.content.text).await;
+    broadcaster.broadcast(&chunk).await;
     println!("{:?}", chunk);
     HttpResponse::Ok().body(chunk.session_id.clone())
 }
