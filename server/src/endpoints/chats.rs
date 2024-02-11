@@ -8,6 +8,7 @@ use actix_web_lab::{
 };
 use futures_util::future;
 use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -18,22 +19,22 @@ pub fn chat_endpoints() -> impl HttpServiceFactory {
         .service(broadcast)
 }
 
-pub struct Broadcaster {
+pub struct ChatBroadcaster {
     inner: Mutex<BroadcasterInner>,
 }
 
 #[derive(Debug, Clone, Default)]
 struct BroadcasterInner {
-    clients: Vec<mpsc::Sender<sse::Event>>,
+    connections: HashMap<String, Vec<mpsc::Sender<sse::Event>>>,
 }
 
-impl Broadcaster {
+impl ChatBroadcaster {
     pub fn create() -> Arc<Self> {
-        let this = Arc::new(Broadcaster {
+        let this = Arc::new(ChatBroadcaster {
             inner: Mutex::new(BroadcasterInner::default()),
         });
 
-        Broadcaster::spawn_ping(Arc::clone(&this));
+        ChatBroadcaster::spawn_ping(Arc::clone(&this));
 
         this
     }
@@ -50,60 +51,97 @@ impl Broadcaster {
     }
 
     async fn remove_stale_clients(&self) {
-        let clients = self.inner.lock().clients.clone();
-        println!("Checking {} clients", clients.len());
+        let connections = self.inner.lock().connections.clone();
 
-        let mut ok_clients = Vec::new();
+        let mut ok_clients = HashMap::new();
 
-        for client in clients {
-            if client
-                .send(sse::Event::Comment("ping".into()))
-                .await
-                .is_ok()
-            {
-                ok_clients.push(client.clone());
+        for (channel_id, clients) in connections.iter() {
+            for client in clients {
+                if client
+                    .send(sse::Event::Comment("ping".into()))
+                    .await
+                    .is_ok()
+                {
+                    ok_clients
+                        .entry(channel_id.clone())
+                        .or_insert_with(Vec::new)
+                        .push(client.clone());
+                }
             }
         }
-        println!("Active {} clients", ok_clients.len());
 
-        self.inner.lock().clients = ok_clients;
+        for (channel_id, clients) in ok_clients.iter() {
+            if clients.len() != connections.get(channel_id).unwrap().len() {
+                println!("Removed stale clients for channel {}", channel_id);
+            }
+        }
+
+        self.inner.lock().connections = ok_clients;
     }
 
-    pub async fn new_client(&self) -> Sse<InfallibleStream<ReceiverStream<sse::Event>>> {
+    pub async fn new_client(
+        &self,
+        channel_id: String,
+        user_id: String,
+    ) -> Sse<InfallibleStream<ReceiverStream<sse::Event>>> {
         let (tx, rx) = mpsc::channel(1000);
 
         tx.send(sse::Data::new("connected").into()).await.unwrap();
 
-        self.inner.lock().clients.push(tx);
+        self.inner
+            .lock()
+            .connections
+            .entry(channel_id.clone())
+            .or_insert_with(Vec::new)
+            .push(tx);
+
+        self.broadcast(
+            channel_id.clone(),
+            &ChatChunk {
+                session_id: "server".to_string(),
+                user_id: user_id.clone(),
+                event: crate::models::chat::ChatEvent::NewClient,
+            },
+        )
+        .await;
 
         Sse::from_infallible_receiver(rx)
     }
 
-    pub async fn broadcast(&self, chat_chunk: &ChatChunk) {
-        let clients = self.inner.lock().clients.clone();
+    pub async fn broadcast(&self, channel_id: String, chat_chunk: &ChatChunk) {
+        let clients = self
+            .inner
+            .lock()
+            .connections
+            .get(&channel_id)
+            .unwrap_or(&Vec::new())
+            .clone();
 
         let send_futures = clients.iter().map(|client| {
             client.send(sse::Data::new(chat_chunk.to_broadcast_chunk().to_string()).into())
         });
 
-        println!("Broadcasting to {} clients", clients.len());
         let _ = future::join_all(send_futures).await;
-        println!("Broadcasting done");
     }
 }
 
-#[get("/")]
-async fn event_stream(broadcaster: web::Data<Broadcaster>) -> impl Responder {
-    broadcaster.new_client().await
+#[get("/{channel_id}/{user_id}")]
+async fn event_stream(
+    path: web::Path<(String, String)>,
+    broadcaster: web::Data<ChatBroadcaster>,
+) -> impl Responder {
+    let (channel_id, user_id) = path.into_inner();
+    broadcaster.new_client(channel_id, user_id).await
 }
 
-#[post("/broadcast")]
+#[post("/broadcast/{channel_id}")]
 async fn broadcast(
-    broadcaster: web::Data<Broadcaster>,
-    // path: Path<(String,)>,
+    broadcaster: web::Data<ChatBroadcaster>,
+    path: web::Path<String>,
     chunk: web::Json<ChatChunk>,
 ) -> impl Responder {
-    broadcaster.broadcast(&chunk).await;
-    println!("{:?}", chunk);
+    let channel_id = path.into_inner();
+    broadcaster.broadcast(channel_id, &chunk).await;
+
     HttpResponse::Ok().body(chunk.session_id.clone())
 }

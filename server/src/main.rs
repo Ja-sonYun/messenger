@@ -21,13 +21,13 @@ async fn main() -> Result<()> {
 
     // Global states
     let pool = establish_pool_connection()?;
-    let broadcaster = Broadcaster::create();
+    let chat_broadcaster = ChatBroadcaster::create();
     let private_key = Key::generate();
 
     HttpServer::new(move || {
         App::new()
             .app_data(Data::new(pool.clone()))
-            .app_data(Data::from(Arc::clone(&broadcaster)))
+            .app_data(Data::from(Arc::clone(&chat_broadcaster)))
             .wrap(session_middleware("127.0.0.1:6379", &private_key))
             .service(hello)
             .service(user_endpoints())
